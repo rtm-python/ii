@@ -1,148 +1,456 @@
-
+"""
+"""
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.common.exceptions import StaleElementReferenceException
 
-import numpy
-import cv2
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+
+import httpx
 import logging
 import time
+import os
+import ssl
 
 from typing import List
 from dataclasses import dataclass
 from dataclasses import field
 from urllib.parse import urlparse
+from uuid import uuid4
+
+from threading import Thread, Event, Lock
+from queue import Queue, Empty
 
 NAVTAG = '#'
 URL_ENDING_SLASH = '/'
-SCREENSHOT_SIZE_COEF = 0.3
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+handler.setLevel(logging.INFO)
+logger.addHandler(handler)
 
 
-def take_body_screenshot(driver) -> numpy.ndarray:
-    body = driver.find_elements(By.TAG_NAME, 'body')[0]
-    png = body.screenshot_as_png
-    bytes = numpy.frombuffer(png, dtype=numpy.uint8)
-    screenshot = cv2.imdecode(bytes, cv2.IMREAD_COLOR)
-    height, width, _ = screenshot.shape
-    return cv2.resize(
-        screenshot,
-        (
-            int(width * SCREENSHOT_SIZE_COEF),
-            int(height * SCREENSHOT_SIZE_COEF)
-        )
-    )
+def remove_url_ending_slash(url: str) -> str:
+    """
+    Returns the URL with the trailing slash removed if present.
 
-
-def fix_url_ending_slash(url: str) -> str:
+    Removes any trailing '/' character from the end of the URL string.
+    """
     return url[: -1] if url.endswith(URL_ENDING_SLASH) else url
+
+
+def save_body_screenshot(browser, folder: str) -> str:
+    """
+    Saves a screenshot of the browser body element to a PNG file.
+
+    Parameters:
+    browser (WebDriver): The Selenium WebDriver instance. 
+    folder (str): The folder path to save the screenshot to.
+
+    Returns:
+    str: The filename of the saved screenshot.
+    """
+    filename = str(uuid4())
+    filepath = os.path.join(folder, f'{filename}.png')
+    body = browser.find_elements(By.TAG_NAME, 'body')[0]
+    with open(filepath, "wb") as file:
+        file.write(body.screenshot_as_png)
+    return filename
+
+
+def verify_url_as_html(url: str) -> bool:
+    """
+    Verifies that the given URL returns an HTML content type 
+    in the response headers when requested.
+
+    Parameters:
+    url (str): The URL to request and verify.
+
+    Returns:
+    bool: True if the URL returns HTML, False otherwise.
+
+    """
+    try:
+        with httpx.Client(verify=True) as client:
+            content_type = client.head(url, follow_redirects=True).\
+                headers.get("content-type", "")
+            if "text/html" not in content_type:
+                return False
+    
+    except httpx.RequestError:
+        logger.error(f'[ ERROR ] {url}')
+        
+    return True
+
+
+@dataclass
+class Certificate:
+    """
+    Certificate class to represent an X509 certificate.
+
+    Initializes the certificate attributes by decoding a PEM certificate 
+    for the given domain.
+    """
+    domain: str = None
+    subject: str = None
+    issuer: str = None
+    serial_number: int = None
+    not_valid_before_utc: float = None
+    not_valid_after_utc: float = None
+    version: int = None
+    signature: str = None
+    signature_hash_algorithm: str = None
+    
+    def __post_init__(self):
+        """
+        Initializes the certificate attributes by decoding a PEM certificate
+        for the given domain.
+        
+        Decodes the PEM certificate obtained from the domain into attributes 
+        like subject, issuer, validity period, etc. This allows easy access to
+        certificate details after initialization.
+        """
+        cert = ssl.get_server_certificate(
+            (self.domain, 443))
+        cert_decoded = x509.load_pem_x509_certificate(
+            str.encode(cert), default_backend())
+        self.subject = cert_decoded.subject.rfc4514_string()
+        self.issuer = cert_decoded.issuer.rfc4514_string()
+        self.serial_number = cert_decoded.serial_number
+        self.not_valid_before_utc = \
+            cert_decoded.not_valid_before_utc.timestamp()
+        self.not_valid_after_utc = \
+            cert_decoded.not_valid_after_utc.timestamp()
+        self.version = cert_decoded.version.value
+        self.signature = cert_decoded.signature.hex()
+        self.signature_hash_algorithm = \
+            cert_decoded.signature_hash_algorithm.name
 
 
 @dataclass
 class Webpage:
+    """
+    Webpage class to represent a webpage and related metadata.
+
+    Attributes include url, parent url, load time, screenshot, and child urls.
+    Methods include load() to load the page in a browser and record metadata.
+    """
     url: str
-    parent: "Webpage"
+    parent_url: str
     load_seconds: float = None
-    webpages: List["Webpage"] = field(default_factory=list)
-    screenshot: numpy.ndarray = None
+    screenshot: str = None
+    urls: List[str] = field(default_factory=list)
 
     def __post_init__(self):
-        self.url = fix_url_ending_slash(self.url)
+        """
+        Removes edning trailing slash from the given URL.
+    
+        This ensures consistent formatting of URLs before further 
+        processing.
+        """
+        self.url = remove_url_ending_slash(self.url)
 
-    def discover(self, parent_driver = None, ignore_navtags: bool = True,
-                 skip_screenshot: bool = True, do_headless: bool = True,
-                 skip_subdomain: bool = True, skip_url_args: bool = True,
-                 within_domain: str = None) -> bool:
-
-        domain = urlparse(self.url).netloc
-
+    def load(self, browser) -> "Webpage":
+        """
+        Loads the webpage in the browser and records metadata.
+    
+        This loads the webpage at the url in the browser instance passed in.
+        It records the load time, takes a screenshot, and finds child urls.
+        
+        Returns the Webpage instance to allow method chaining.
+        """
         try:
-            if parent_driver is not None:
-                driver = parent_driver
-
-            else:
-                options = FirefoxOptions()
-                if do_headless:
-                    options.add_argument("--headless")
-
-                driver = webdriver.Firefox(options=options)
-
             time_before = time.perf_counter()
-            driver.get(self.url)
-            
+            browser.get(self.url)
+
             time_after = time.perf_counter()
             self.load_seconds = time_after - time_before
-            logging.info(f'[ {self.load_seconds:2f} ] {self.url}')
+            logger.info(f'[ {self.load_seconds:.2f} secs ] {self.url}')
 
-            if not skip_screenshot:
-                self.screenshot = take_body_screenshot(driver)
-
-            hrefs = []
-            for link in driver.find_elements(By.TAG_NAME, "a"):
-                try:
-                    href = link.get_attribute("href")
-                    if href is None or href == "":
-                        continue
-                    hrefs += [ fix_url_ending_slash(href) ]
-                
-                except StaleElementReferenceException:
-                    continue
-
-            for href in hrefs:
-                if ignore_navtags and NAVTAG in href:
-                    continue
-                href_domain = urlparse(href).netloc
-                if within_domain is not None and \
-                        not href_domain.endswith(within_domain):
-                    continue
-                if skip_subdomain and not domain == href_domain:
-                    continue
-                if skip_url_args and '?' in href:
-                    continue
-            
-                if not self.is_circular(href):
-                    webpage = Webpage(href, self)
-                    if webpage.discover(
-                                driver,
-                                skip_screenshot=skip_screenshot,
-                                ignore_navtags=ignore_navtags,
-                                do_headless=do_headless,
-                                skip_subdomain=skip_subdomain,
-                                skip_url_args=skip_url_args,
-                                within_domain=within_domain
-                            ):
-                        self.webpages += [ webpage ]
-            
         except Exception as exc:
-            logging.info(f'{self}: {self.webpages}')
-            logging.error(exc)
-            return False
+            logger.error(f'[ ERROR ] {self.url}')
+            return self
 
-        finally:
-            if parent_driver is None:
-                driver.quit()
-                driver.close()
+        self.urls = []
+        for element in browser.find_elements(By.TAG_NAME, "a"):
+            try:
+                url = element.get_attribute("href")
+                if url is None or url == "":
+                    continue
+                self.urls += [ url ]
+            
+            except StaleElementReferenceException:
+                logger.error(f'[ ERROR ] {self.url}')
+                continue
+        
+        return self
+
+
+@dataclass
+class WebsiteOptions:
+    """
+    Configuration options for website mapping.
+
+    This class contains options to control the behavior of the website 
+    crawler, including whether to run headless, what URLs to skip, whether
+    to take screenshots, and where to save screenshots.
+
+    These options are set once when the mapper is initialized and apply
+    to all pages mapped in that run.
+    """
+    do_headless: bool = True
+    skip_subdomain: bool = True
+    skip_url_args: bool = True
+    skip_other_domain: bool = True
+    skip_navtag: bool = True
+    skip_screenshot: bool = True
+    screenshot_folder: str = 'screenshots'
+
+
+@dataclass
+class Website:
+    """
+    Website class represents a website to be crawled. It contains the root URL, 
+    domain name, crawling options, and storage for crawled webpages and SSL 
+    certificates discovered.
+
+    The key methods are:
+
+    - load() - Starts crawler threads to traverse and load webpages from the site
+    - get_webpage() - Gets a loaded Webpage by URL 
+    - add_webpage() - Adds a loaded Webpage
+    - get_certificate() - Gets SSL Certificate by domain
+    - add_certificate() - Adds discovered SSL Certificate
+
+    The WebsiteOptions dataclass contains configuration options for the crawler.
+    """
+    url: str
+    domain: str = field(default=None, init=False)
+    options: WebsiteOptions = WebsiteOptions()
+    webpages: dict = field(default_factory=dict, init=False)
+    certificates: dict = field(default_factory=dict, init=False)
+
+    def __post_init__(self):
+        """
+        Validate screenshot folder exists if screenshots are enabled.
+        
+        Raises an exception if screenshot folder does not exist but screenshots are 
+        enabled in the WebsiteOptions.
+        """
+        self.url = remove_url_ending_slash(self.url)
+        self.domain = urlparse(self.url).netloc
+        if not self.options.skip_screenshot:
+            if not os.path.isdir(self.options.screenshot_folder):
+                raise Exception(
+                    f'Screenshot folder does not exist: ' + \
+                    f'{self.options.screenshot_folder}'
+                )
+
+    def validate_url(self, url: str) -> bool:
+        """
+        Validates if a given URL matches the website's domain and mapping options.
+        
+        Checks if the URL matches the configured options to skip URLs with arguments, 
+        navigation tags, subdomains, or other domains. This allows filtering out certain
+        URLs during mapping.
+        
+        Returns True if the URL should be mapped based on the options, False otherwise.
+        """
+        if self.options.skip_url_args:
+            if '?' in url:
+                return False
+
+        if self.options.skip_navtag:
+            if NAVTAG in url:
+                return False
+
+        domain = urlparse(url).netloc
+
+        if self.options.skip_other_domain:
+            if not domain.endswith(self.domain):
+                return False
+
+        if self.options.skip_subdomain:
+            if domain != self.domain:
+                return False
 
         return True
 
-    def is_circular(self, url: str) -> bool:
-        if self.url == url:
-            return True
-        if self.parent is None:
-            return False
-        elif self.parent.url == url:
-            return True
-        for webpage in self.webpages:
-            if webpage.url == url:
-                return True
-        return self.parent.is_circular(url)
+    def load(self, thread_count: int) -> None:
+        """
+        Loads the website by spawning multiple threads to map all pages.
+        
+        Spawns `thread_count` threads to map the site in parallel, with a shared 
+        queue for urls and synchronization primitives to coordinate. The root url
+        is added first, then threads pull urls from the queue to map until no 
+        urls remain.
+        """
+        lock = Lock()
+        break_event = Event()
+        url_with_parent_queue = Queue()
+        worker_queue = Queue()
 
-    def json(self) -> dict:
-        return {
-            "url": self.url,
-            "webpages": [ webpage.json() for webpage in self.webpages ],
-        }
+        load_threads = []
+        for _ in range(thread_count):
+            load_thread = Thread(
+                target=Website.__load_in_thread,
+                args=(
+                    self, lock, break_event,
+                    url_with_parent_queue, worker_queue
+                )
+            )
+            load_thread.start()
+            load_threads += [ load_thread ]
 
-    def __str__(self) -> str:
-        return self.url
+        url_with_parent_queue.put_nowait((self.url, None))     
+        try:
+            while not break_event.is_set():
+                time.sleep(1)
+                if len(url_with_parent_queue.queue) == 0 \
+                        and len(worker_queue.queue) == 0:
+                    break_event.set()
+                    logger.info("Website load complete")
+
+        except KeyboardInterrupt:
+            break_event.set()
+            logger.info("KeyboardInterrupt")
+        
+        for load_thread in load_threads:
+            load_thread.join()
+    
+    @staticmethod
+    def __load_in_thread(
+            website: "Website", lock: Lock, break_event: Event,
+            url_with_parent_queue: Queue, worker_queue: Queue) -> None:
+        """
+        Loads webpages in a thread. 
+        
+        This spawns a thread that loads webpages from a queue, using a Firefox 
+        browser instance. It gets urls from the queue, checks if they should be 
+        skipped, loads the webpage in the browser, saves a screenshot if enabled,
+        and adds child urls back to the queue. It repeats this process until the
+        queue is empty.
+        """
+        options = FirefoxOptions()
+        if website.options.do_headless:
+            options.add_argument("--headless")
+            logger.info('Headless mode enabled')
+
+        with webdriver.Firefox(options=options) as browser:
+            logger.info('Browser loaded')
+
+            is_working = False
+            while not break_event.is_set():
+                try:
+                    if is_working:
+                        is_working = False
+                        worker_queue.get(timeout=1)
+
+                    (url, parent) = url_with_parent_queue.get(timeout=1)
+                    is_working = True
+                    worker_queue.put_nowait(is_working)
+
+                    if not website.validate_url(url):
+                        logger.debug(f'[ SKIP ] {url}')
+                        continue
+
+                    if not verify_url_as_html(url):
+                        logger.debug(f'[ FILE ] {url}')
+                        continue
+
+                    with lock:
+                        if website.get_webpage(url) is not None:
+                            logger.debug(f'[ SKIP ] {url}')
+                            continue
+                        webpage = website.add_webpage(Webpage(url, parent))
+                        domain = urlparse(url).netloc
+                        if website.get_certificate(domain) is None:
+                            website.add_certificate(Certificate(domain))
+                            logger.info(f'[ CERTIFICATE ] {domain}')
+
+                    urls = webpage.load(browser).urls
+                    if not website.options.skip_screenshot:
+                        webpage.screenshot = save_body_screenshot(
+                            browser, website.options.screenshot_folder)
+
+                    for url in urls:
+                        url = remove_url_ending_slash(url)
+
+                        if not website.validate_url(url):
+                            logger.debug(f'[ SKIP ] {url}')
+                            continue
+
+                        if webpage.url == url:
+                            logger.debug(f'[ SKIP ] {url}')
+                            continue
+
+                        with lock:
+                            if website.get_webpage(url) is not None:
+                                logger.debug(f'[ SKIP ] {url}')
+                                continue
+                        
+                        url_with_parent_queue.put_nowait((url, webpage.url))
+
+                except Empty:
+                    pass
+
+                except Exception as exc:
+                    logger.error(exc)
+
+        logger.info('Browser closed')
+
+    def get_webpage(self, url: str) -> Webpage:
+        """
+        Get the Webpage object for the given URL if it exists.
+        
+        Parameters:
+        url (str): The URL of the webpage to retrieve.
+        
+        Returns:
+        Webpage: The Webpage object for the given URL, or None if not found.
+        """
+        return self.webpages.get(url)
+
+    def add_webpage(self, webpage: Webpage) -> Webpage:
+        """
+        Add a Webpage object to the website.
+        
+        Parameters:
+        webpage (Webpage): The Webpage object to add.
+        
+        Returns: 
+        Webpage: The added Webpage object.
+        """
+        self.webpages[webpage.url] = webpage
+        return webpage
+
+    def get_certificate(self, domain: str) -> Certificate:
+        """
+        Get the Certificate object for the given domain if it exists.
+        
+        Parameters:
+        domain (str): The domain to retrieve the certificate for.
+        
+        Returns:
+        Certificate: The Certificate object for the given domain, or None if not found.
+        """
+        return self.certificates.get(domain)
+    
+    def add_certificate(self, certificate: Certificate) -> Certificate:
+        """
+        Add a Certificate object to the website.
+        
+        Parameters:
+        certificate (Certificate): The Certificate object to add.
+        
+        Returns:
+        Certificate: The added Certificate object. 
+        """
+        self.certificates[certificate.domain] = certificate
+        return certificate

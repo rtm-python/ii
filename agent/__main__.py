@@ -1,61 +1,34 @@
 """
-
 """
 
-import asyncio
-import httpx
-import logging
-import json
-
-from mapper import Webpage
+from mapper import Website, WebsiteOptions
 from argparse import ArgumentParser
-from urllib.parse import urlparse
-
-
-def getLogger(name: str, level: int) -> logging.Logger:
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.level)
-
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.level)
-
-    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
-    handler.setFormatter(formatter)
-
-    logger.addHandler(handler)
-    return logger
-
-
-
-async def read(url: str):
-    async with httpx.AsyncClient() as client:
-        return await client.get(url)
 
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('--headless', action='store_true', default=False)
-    parser.add_argument('--ignore-navtags', action='store_true', default=False)
-    parser.add_argument('--skip-screenshot', action='store_true', default=False)
-    parser.add_argument('--skip-subdomain', action='store_true', default=False)
-    parser.add_argument('--skip-url-args', action='store_true', default=False)
-    parser.add_argument('--within-domain', action='store_true', default=False)
+    parser.add_argument('--do-headless', action='store_true', default=True)
+    parser.add_argument('--skip-subdomain', action='store_true', default=True)
+    parser.add_argument('--skip-url-args', action='store_true', default=True)
+    parser.add_argument('--skip-other-domain', action='store_true', default=True)
+    parser.add_argument('--skip-navtags', action='store_true', default=True)
+    parser.add_argument('--skip-screenshot', action='store_true', default=True)
+    parser.add_argument('--screenshot-folder', type=str, default='screenshots')
+    parser.add_argument('--thread-count', type=int, default=10)
     parser.add_argument('--url', type=str, default='https://www.python.org/')
     args = parser.parse_args()
 
-    try:
-        logging.basicConfig(level=logging.INFO)
-        domain = urlparse(args.url).netloc
-        webpage = Webpage(args.url, None)
-        webpage.discover(
-            do_headless=args.headless,
-            skip_screenshot=args.skip_screenshot,
-            ignore_navtags=args.ignore_navtags,
+    options = WebsiteOptions(skip_screenshot=False, skip_subdomain=False)
+    website = Website(
+        args.url,
+        options=WebsiteOptions(
+            do_headless=args.do_headless,
             skip_subdomain=args.skip_subdomain,
             skip_url_args=args.skip_url_args,
-            within_domain=domain if args.within_domain else None
+            skip_other_domain=args.skip_other_domain,
+            skip_navtag=args.skip_navtags,
+            skip_screenshot=args.skip_screenshot,
+            screenshot_folder=args.screenshot_folder
         )
-        logging.info(json.dumps(webpage.json(), indent=2))
-
-    except KeyboardInterrupt:
-        pass
+    )
+    website.load(thread_count=args.thread_count)
