@@ -217,6 +217,14 @@ class WebsiteOptions:
     skip_screenshot: bool = True
     screenshot_folder: str = 'screenshots'
     screenshot_width: int = 800
+    search_text: str = None
+    _search_text_casefolded: str = None
+
+    def __post_init__(self):
+        """
+        """
+        if self.search_text is not None:
+            self._search_text_casefolded = self.search_text.casefold()
 
 
 @dataclass
@@ -242,6 +250,7 @@ class Website:
     options: WebsiteOptions = WebsiteOptions()
     webpages: dict = field(default_factory=dict, init=False)
     certificates: dict = field(default_factory=dict, init=False)
+    search_match_urls: List[str] = field(default_factory=list, init=False)
 
     def __post_init__(self):
         """
@@ -394,6 +403,12 @@ class Website:
                     if not website.options.skip_screenshot:
                         webpage.screenshot = save_body_screenshot(
                             browser, website.options.screenshot_folder)
+
+                    if website.options._search_text_casefolded is not None:
+                        if website.options._search_text_casefolded in \
+                                str(browser.page_source).casefold():
+                            website.search_match_urls += [ webpage.url ]
+                            logger.info(f'[ MATCH ] {webpage.url}')
 
                     for url in urls:
                         url = remove_url_ending_slash(url)

@@ -21,6 +21,7 @@ if __name__ == '__main__':
     parser.add_argument('--screenshot-width', type=int, default=800)
     parser.add_argument('--thread-count', type=int, default=10)
     parser.add_argument('--url', type=str, default='https://www.python.org/')
+    parser.add_argument('--search-text', type=str, default=None)
     args = parser.parse_args()
 
     logger = logging.getLogger('AGENT')
@@ -47,8 +48,13 @@ if __name__ == '__main__':
             skip_navtag=args.skip_navtags,
             skip_screenshot=args.skip_screenshot,
             screenshot_folder=args.screenshot_folder,
-            screenshot_width=args.screenshot_width
+            screenshot_width=args.screenshot_width,
+            search_text=args.search_text
         )
     )
     website.load(thread_count=args.thread_count)
     logger.info(f'"{args.url}" loaded: {len(website.webpages.items())} webpages')
+    if args.search_text is not None:
+        logger.info(f'"{args.search_text}" found in {len(website.search_match_urls)} webpages')
+        for url in website.search_match_urls:
+            logger.info(f'[+] {url}')
