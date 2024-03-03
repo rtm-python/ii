@@ -140,10 +140,11 @@ class Webpage:
     Methods include load() to load the page in a browser and record metadata.
     """
     url: str
-    parent_url: str
+    domain: str = None
+    path: str = None
     load_seconds: float = None
     screenshot: str = None
-    urls: List[str] = field(default_factory=list)
+    urls: List[str] = None
 
     def __post_init__(self):
         """
@@ -153,6 +154,9 @@ class Webpage:
         processing.
         """
         self.url = remove_url_ending_slash(self.url)
+        parsed_url = urlparse(self.url)
+        self.domain = parsed_url.netloc
+        self.path = parsed_url.path
 
     def load(self, browser) -> "Webpage":
         """
@@ -247,8 +251,9 @@ class Website:
         enabled in the WebsiteOptions.
         """
         self.url = remove_url_ending_slash(self.url)
-        self.domain = urlparse(self.url).netloc
-        self.path = urlparse(self.url).path
+        parsed_url = urlparse(self.url)
+        self.domain = parsed_url.netloc
+        self.path = parsed_url.path
         if not self.options.skip_screenshot:
             if not os.path.isdir(self.options.screenshot_folder):
                 raise Exception(
@@ -274,20 +279,18 @@ class Website:
             if NAVTAG in url:
                 return False
 
-        domain = urlparse(url).netloc
+        parsed_url = urlparse(url)
 
         if self.options.skip_other_domain:
-            if not domain.endswith(self.domain):
+            if not parsed_url.netloc.endswith(self.domain):
                 return False
 
         if self.options.skip_subdomain:
-            if domain != self.domain:
+            if parsed_url.netloc != self.domain:
                 return False
-        
-        path = urlparse(url).path
 
         if self.options.skip_upper_path:
-            if not path.startswith(self.path):
+            if not parsed_url.path.startswith(self.path):
                 return False
 
         return True
@@ -321,9 +324,9 @@ class Website:
         url_with_parent_queue.put_nowait((self.url, None))     
         try:
             while not break_event.is_set():
-                time.sleep(1)
-                if len(url_with_parent_queue.queue) == 0 \
-                        and len(worker_queue.queue) == 0:
+                time.sleep(10)
+                if len(worker_queue.queue) == 0 \
+                        and len(url_with_parent_queue.queue) == 0:
                     break_event.set()
                     logger.info("Website load complete")
 
@@ -381,10 +384,11 @@ class Website:
                             logger.debug(f'[ SKIP ] {url}')
                             continue
                         webpage = website.add_webpage(Webpage(url, parent))
-                        domain = urlparse(url).netloc
-                        if website.get_certificate(domain) is None:
-                            website.add_certificate(Certificate(domain))
-                            logger.info(f'[ CERTIFICATE ] {domain}')
+
+                    with lock:
+                        if website.get_certificate(webpage.domain) is None:
+                            website.add_certificate(Certificate(webpage.domain))
+                            logger.info(f'[ CERTIFICATE ] {webpage.domain}')
 
                     urls = webpage.load(browser).urls
                     if not website.options.skip_screenshot:
