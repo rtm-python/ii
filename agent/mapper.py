@@ -27,13 +27,7 @@ from queue import Queue, Empty
 NAVTAG = '#'
 URL_ENDING_SLASH = '/'
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler = logging.StreamHandler()
-handler.setFormatter(formatter)
-handler.setLevel(logging.INFO)
-logger.addHandler(handler)
+logger = logging.getLogger('AGENT')
 
 
 def remove_url_ending_slash(url: str) -> str:
@@ -78,13 +72,14 @@ def verify_url_as_html(url: str) -> bool:
     """
     try:
         with httpx.Client(verify=True) as client:
-            content_type = client.head(url, follow_redirects=True).\
-                headers.get("content-type", "")
+            response = client.head(url, follow_redirects=True)
+            content_type = response.headers.get("content-type", "")
             if "text/html" not in content_type:
                 return False
     
     except httpx.RequestError:
         logger.error(f'[ ERROR ] {url}')
+        return False
         
     return True
 
@@ -206,6 +201,7 @@ class WebsiteOptions:
     """
     do_headless: bool = True
     skip_subdomain: bool = True
+    skip_upper_path: bool = True
     skip_url_args: bool = True
     skip_other_domain: bool = True
     skip_navtag: bool = True
@@ -232,6 +228,7 @@ class Website:
     """
     url: str
     domain: str = field(default=None, init=False)
+    path: str = field(default=None, init=False)
     options: WebsiteOptions = WebsiteOptions()
     webpages: dict = field(default_factory=dict, init=False)
     certificates: dict = field(default_factory=dict, init=False)
@@ -245,6 +242,7 @@ class Website:
         """
         self.url = remove_url_ending_slash(self.url)
         self.domain = urlparse(self.url).netloc
+        self.path = urlparse(self.url).path
         if not self.options.skip_screenshot:
             if not os.path.isdir(self.options.screenshot_folder):
                 raise Exception(
@@ -278,6 +276,12 @@ class Website:
 
         if self.options.skip_subdomain:
             if domain != self.domain:
+                return False
+        
+        path = urlparse(url).path
+
+        if self.options.skip_upper_path:
+            if not path.startswith(self.path):
                 return False
 
         return True
