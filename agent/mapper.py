@@ -52,9 +52,11 @@ def save_body_screenshot(browser, folder: str) -> str:
     """
     filename = str(uuid4())
     filepath = os.path.join(folder, f'{filename}.png')
-    body = browser.find_elements(By.TAG_NAME, 'body')[0]
+    body = browser.find_elements(By.TAG_NAME, 'body')
+    if len(body) == 0:
+        raise ValueError(f'No element <body> on "{browser.current_url}"')        
     with open(filepath, "wb") as file:
-        file.write(body.screenshot_as_png)
+        file.write(body[0].screenshot_as_png)
     return filename
 
 
@@ -77,8 +79,9 @@ def verify_url_as_html(url: str) -> bool:
             if "text/html" not in content_type:
                 return False
     
-    except httpx.RequestError:
-        logger.error(f'[ ERROR ] {url}')
+    except httpx.RequestError as exc:
+        logger.error(f'[ VERIFY HTML ] {url}')
+        logger.debug(exc)
         return False
         
     return True
@@ -169,7 +172,8 @@ class Webpage:
             logger.info(f'[ {self.load_seconds:.2f} secs ] {self.url}')
 
         except Exception as exc:
-            logger.error(f'[ ERROR ] {self.url}')
+            logger.error(f'[ LOAD WEBPAGE ] {self.url}')
+            logger.debug(exc)
             return self
 
         self.urls = []
@@ -180,8 +184,9 @@ class Webpage:
                     continue
                 self.urls += [ url ]
             
-            except StaleElementReferenceException:
-                logger.error(f'[ ERROR ] {self.url}')
+            except StaleElementReferenceException as exc:
+                logger.error(f'[ STALE ELEMENT ] {self.url}')
+                logger.debug(exc)
                 continue
         
         return self
@@ -207,6 +212,7 @@ class WebsiteOptions:
     skip_navtag: bool = True
     skip_screenshot: bool = True
     screenshot_folder: str = 'screenshots'
+    screenshot_width: int = 800
 
 
 @dataclass
@@ -342,6 +348,8 @@ class Website:
         queue is empty.
         """
         options = FirefoxOptions()
+        options.add_argument(f'--width={website.options.screenshot_width}')
+        options.add_argument(f'--height={website.options.screenshot_width}')
         if website.options.do_headless:
             options.add_argument("--headless")
             logger.info('Headless mode enabled')
@@ -406,6 +414,8 @@ class Website:
 
                 except Exception as exc:
                     logger.error(exc)
+            
+            browser.close()
 
         logger.info('Browser closed')
 
