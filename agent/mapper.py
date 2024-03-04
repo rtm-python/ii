@@ -75,14 +75,21 @@ def verify_url_as_html(url: str) -> bool:
     """
     try:
         with httpx.Client(verify=True) as client:
-            response = client.head(url, follow_redirects=True)
+            response = client.head(
+                url, follow_redirects=True, timeout=900.0)
             content_type = response.headers.get("content-type", "")
             if "text/html" not in content_type:
                 return False
+            content_disposition = response.headers.get(
+                "content-disposition", "inline")
+            if "inline" not in content_disposition:
+                return False
     
-    except httpx.RequestError as exc:
-        logger.error(f'[ VERIFY HTML ] {url}')
-        logger.debug(exc)
+    except Exception as exc:
+        logger.error(
+            f'[ VERIFY HTML ] {url} ({exc})',
+            exc_info=(logger.level == logging.DEBUG)
+        )
         return False
         
     return True
@@ -189,20 +196,37 @@ class Webpage:
         Returns the Webpage instance to allow method chaining.
         """
         try:
+            time_after = time.perf_counter()
             time_before = time.perf_counter()
             browser.get(self.url)
 
             time_after = time.perf_counter()
             self.load_seconds = time_after - time_before
-            logger.info(f'[ {self.load_seconds:.2f} secs ] {self.url}')
 
         except Exception as exc:
-            logger.error(f'[ LOAD WEBPAGE ] {self.url}')
-            logger.debug(exc)
-            return self
+            message = str(exc).split('\n')[0]
+            logger.error(
+                f'[ LOAD WEBPAGE ] {self.url} ({message})',
+                exc_info=(logger.level == logging.DEBUG)
+            )
+        
+        finally:
+            if time_after > time_before:
+                logger.info(f'[ {self.load_seconds:.2f} secs ] {self.url}')
+            else:
+                logger.info(f'[ TIMEOUT ] {self.url}')
 
         self.urls = []
-        for element in browser.find_elements(By.TAG_NAME, "a"):
+        try:
+            elements = browser.find_elements(By.TAG_NAME, "a")
+        
+        except Exception as exc:
+            logger.error(
+                f'[ FIND ELEMENTS ] {self.url} ({exc})',
+            )
+            return self
+
+        for element in elements:
             try:
                 url = element.get_attribute("href")
                 if url is None or url == "":
@@ -210,8 +234,10 @@ class Webpage:
                 self.urls += [ url ]
             
             except StaleElementReferenceException as exc:
-                logger.error(f'[ STALE ELEMENT ] {self.url}')
-                logger.debug(exc)
+                logger.error(
+                    f'[ STALE ELEMENT ] {self.url} ({exc})',
+                    exc_info=(logger.level == logging.DEBUG)
+                )
                 continue
         
         return self
@@ -380,7 +406,7 @@ class Website:
         url_with_parent_queue.put_nowait((self.url, None))     
         try:
             while not break_event.is_set():
-                time.sleep(10)
+                time.sleep(5)
                 if len(worker_queue.queue) == 0 \
                         and len(url_with_parent_queue.queue) == 0:
                     break_event.set()
@@ -426,12 +452,12 @@ class Website:
             while not break_event.is_set():
                 try:
                     if is_working:
-                        is_working = False
                         worker_queue.get(timeout=1)
+                        is_working = False
 
                     (url, parent) = url_with_parent_queue.get(timeout=1)
-                    is_working = True
                     worker_queue.put_nowait(is_working)
+                    is_working = True
 
                     if not website.validate_url(url):
                         logger.debug(f'[ SKIP ] {url}')
