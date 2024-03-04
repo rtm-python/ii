@@ -14,6 +14,7 @@ import logging
 import time
 import os
 import ssl
+import json
 
 from typing import List
 from dataclasses import dataclass
@@ -51,7 +52,7 @@ def save_body_screenshot(browser, folder: str) -> str:
     str: The filename of the saved screenshot.
     """
     filename = str(uuid4())
-    filepath = os.path.join(folder, f'{filename}.png')
+    filepath = os.path.join(folder or '', 'screenshots', f'{filename}.png')
     body = browser.find_elements(By.TAG_NAME, 'body')
     if len(body) == 0:
         raise ValueError(f'No element <body> on "{browser.current_url}"')        
@@ -130,6 +131,26 @@ class Certificate:
         self.signature_hash_algorithm = \
             cert_decoded.signature_hash_algorithm.name
 
+    def json(self) -> dict:
+        """
+        Returns a JSON representation of the certificate attributes.
+        
+        Converts the certificate attributes like subject, issuer, validity period etc 
+        into a JSON dictionary. This allows the certificate details to be easily 
+        serialized and exchanged in JSON format.
+        """
+        return {
+            'domain': self.domain,
+            'subject': self.subject,
+            'issuer': self.issuer,
+            'serial_number': self.serial_number,
+            'not_valid_before_utc': self.not_valid_before_utc,
+            'not_valid_after_utc': self.not_valid_after_utc,
+            'version': self.version,
+            'signature': self.signature,
+            'signature_hash_algorithm': self.signature_hash_algorithm
+        }
+
 
 @dataclass
 class Webpage:
@@ -194,6 +215,22 @@ class Webpage:
                 continue
         
         return self
+    
+    def json(self) -> dict:
+        """
+        Returns a JSON representation of the Webpage instance.
+        
+        Converts the Webpage instance into a JSON serializable dictionary.
+        This contains the core attributes to reconstruct a Webpage elsewhere.
+        """
+        return {
+            'url': self.url,
+            'domain': self.domain,
+            'path': self.path,
+            'load_seconds': self.load_seconds,
+            'screenshot': self.screenshot,
+            'urls': self.urls
+        }
 
 
 @dataclass
@@ -209,16 +246,16 @@ class WebsiteOptions:
     to all pages mapped in that run.
     """
     do_headless: bool = True
-    skip_subdomain: bool = True
-    skip_upper_path: bool = True
+    skip_subdomains: bool = True
+    skip_upper_paths: bool = True
     skip_url_args: bool = True
-    skip_other_domain: bool = True
-    skip_navtag: bool = True
-    skip_screenshot: bool = True
-    screenshot_folder: str = 'screenshots'
+    skip_other_domains: bool = True
+    skip_navtags: bool = True
+    skip_screenshots: bool = True
     screenshot_width: int = 800
     search_text: str = None
     _search_text_casefolded: str = None
+    output_folder: str = None
 
     def __post_init__(self):
         """
@@ -263,12 +300,22 @@ class Website:
         parsed_url = urlparse(self.url)
         self.domain = parsed_url.netloc
         self.path = parsed_url.path
-        if not self.options.skip_screenshot:
-            if not os.path.isdir(self.options.screenshot_folder):
+        if self.options.output_folder is not None:
+            if os.path.isdir(self.options.output_folder):
                 raise Exception(
-                    f'Screenshot folder does not exist: ' + \
-                    f'{self.options.screenshot_folder}'
+                    f'Output folder alreay exist: ' + \
+                    f'{self.options.output_folder}'
                 )
+            os.mkdir(self.options.output_folder)
+        if not self.options.skip_screenshots:
+            screenshot_folder = os.path.join(
+                self.options.output_folder or '', 'screenshots')
+            if os.path.isdir(screenshot_folder):
+               raise Exception(
+                   f'Screenshot folder alreay exist: ' + \
+                   f'{screenshot_folder}'
+               )
+            os.mkdir(screenshot_folder)
 
     def validate_url(self, url: str) -> bool:
         """
@@ -284,21 +331,21 @@ class Website:
             if '?' in url:
                 return False
 
-        if self.options.skip_navtag:
+        if self.options.skip_navtags:
             if NAVTAG in url:
                 return False
 
         parsed_url = urlparse(url)
 
-        if self.options.skip_other_domain:
+        if self.options.skip_other_domains:
             if not parsed_url.netloc.endswith(self.domain):
                 return False
 
-        if self.options.skip_subdomain:
+        if self.options.skip_subdomains:
             if parsed_url.netloc != self.domain:
                 return False
 
-        if self.options.skip_upper_path:
+        if self.options.skip_upper_paths:
             if not parsed_url.path.startswith(self.path):
                 return False
 
@@ -345,6 +392,12 @@ class Website:
         
         for load_thread in load_threads:
             load_thread.join()
+        
+        if self.options.output_folder is not None:
+            filepath = os.path.join(
+                self.options.output_folder, f'website.json')
+            with open(filepath, 'w') as file:
+                file.write(json.dumps(self.json(), indent=2))
     
     @staticmethod
     def __load_in_thread(
@@ -400,9 +453,9 @@ class Website:
                             logger.info(f'[ CERTIFICATE ] {webpage.domain}')
 
                     urls = webpage.load(browser).urls
-                    if not website.options.skip_screenshot:
+                    if not website.options.skip_screenshots:
                         webpage.screenshot = save_body_screenshot(
-                            browser, website.options.screenshot_folder)
+                            browser, website.options.output_folder)
 
                     if website.options._search_text_casefolded is not None:
                         if website.options._search_text_casefolded in \
@@ -487,3 +540,26 @@ class Website:
         """
         self.certificates[certificate.domain] = certificate
         return certificate
+    
+    def json(self) -> dict:
+        """
+        Return a JSON-serializable representation of this Website instance.
+    
+        Returns:
+            dict: A JSON-serializable dictionary representing this Website instance.
+        """
+        return {
+            'url': self.url,
+            'domain': self.domain,
+            'path': self.path,
+            'webpages': [
+                webpage.json()
+                for webpage in self.webpages.values()
+            ],
+            'certificates': [
+                certificate.json()
+                for certificate in self.certificates.values()
+            ],
+            'search_text': self.options.search_text,
+            'search_match_urls': self.search_match_urls
+        }
