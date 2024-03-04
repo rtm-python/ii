@@ -1,4 +1,4 @@
-![Logo of the project](https://raw.githubusercontent.com/rtm-python/ii/master/ii.png)
+![Logo of the project](https://raw.githubusercontent.com/rtm-python/ii/main/ii.png)
 
 # IssueInspector (ii)
 
