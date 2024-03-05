@@ -107,7 +107,6 @@ def verify_url_as_html(url: str) -> bool:
     try:
         headers = request_headers(url)
         
-        print(headers)
         content_type = headers.get("content-type", "")
         if "text/html" not in content_type:
             return False
