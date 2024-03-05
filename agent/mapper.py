@@ -61,6 +61,37 @@ def save_body_screenshot(browser, folder: str) -> str:
     return filename
 
 
+def request_headers(url: str) -> dict:
+    """
+    Requests the headers for the given URL.
+
+    Makes a HEAD request first to get headers. If that fails, 
+    falls back to a GET request.
+
+    Returns:
+        dict: The response headers.
+    """
+    response = None
+    with httpx.Client(verify=True) as client:
+        try:
+            response = client.head(
+                url, follow_redirects=True, timeout=60.0)
+        
+        except Exception as exc:
+            logger.error(
+                f'[ VERIFY HEAD ] {url} ({exc})',
+                exc_info=(logger.level == logging.DEBUG)
+            )
+
+        # Hacky workaround for files
+        # that returns 404 or other errors for head-requests
+        if response is None or response.status_code != 200:
+            response = client.get(
+                url, follow_redirects=True, timeout=60.0)
+
+    return response.headers
+
+
 def verify_url_as_html(url: str) -> bool:
     """
     Verifies that the given URL returns an HTML content type 
@@ -74,16 +105,16 @@ def verify_url_as_html(url: str) -> bool:
 
     """
     try:
-        with httpx.Client(verify=True) as client:
-            response = client.head(
-                url, follow_redirects=True, timeout=900.0)
-            content_type = response.headers.get("content-type", "")
-            if "text/html" not in content_type:
-                return False
-            content_disposition = response.headers.get(
-                "content-disposition", "inline")
-            if "inline" not in content_disposition:
-                return False
+        headers = request_headers(url)
+        
+        print(headers)
+        content_type = headers.get("content-type", "")
+        if "text/html" not in content_type:
+            return False
+        content_disposition = headers.get(
+            "content-disposition", "inline")
+        if "inline" not in content_disposition:
+            return False
     
     except Exception as exc:
         logger.error(
